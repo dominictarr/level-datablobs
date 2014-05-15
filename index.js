@@ -74,7 +74,7 @@ module.exports = function (db, metadb, cas, handler) {
 
   var initialize = pull.defer()
   var workQueue = pushable()
-
+  var ready = false, waiting = []
   // it might be good to know the current state of the queeu?
 
   pull(
@@ -83,6 +83,17 @@ module.exports = function (db, metadb, cas, handler) {
     pull.drain()
   )
 
+
+  function work (meta, cb) {
+    meta._cb = cb
+    workQueue.push(meta)
+  }
+
+
+  //*************** TODO **************
+  // pull-queue
+  // push items onto a work queue,
+  // but first check whether they are already in the queue.
 
   db.createDataBlobStream = function (meta) {
     var stream = through(null, null, {autoDestroy: false})
@@ -97,15 +108,20 @@ module.exports = function (db, metadb, cas, handler) {
         meta.hash = this.hash
         metadb.get('hash-' + meta.hash, function (err, _meta) {
           if(_meta) return done()
+          //if the scan hasn't completed, wait.
 
-          metadb.batch([
-            { key: 'hash-'+meta.hash, value: meta, type: 'put', encoding: 'json' },
-            { key: 'ts-'+meta.timestamp, value: meta, type: 'put', encoding: 'json' },
-          ], function (err) {
-            if(err) return cb ? cb(err) : db.emit('error', err)
-            meta._cb = done
-            workQueue.push(meta)
-          })
+          if(ready) start()
+          else return waiting.push(start)
+
+          function start () {
+            metadb.batch([
+              { key: 'hash-'+meta.hash, value: meta, type: 'put', encoding: 'json' },
+              { key: 'ts-'+meta.timestamp, value: meta, type: 'put', encoding: 'json' },
+            ], function (err) {
+              if(err) return cb ? cb(err) : db.emit('error', err)
+              work(meta, done)
+            })
+          }
         })
       })
     return stream
@@ -115,14 +131,18 @@ module.exports = function (db, metadb, cas, handler) {
   //look in the database, and reprocess anything that did not complete last time.
   //this is done serially, so that datablobs are imported in the same order.
   peek.last(metadb, {start: 'done-!', end: 'done-~'}, function (err, latest) {
-    if(!latest) return initialize.resolve(pull.values([]))//we are done already!
-    var start = 'ts-' + latest.timestamp
+    var start = 'ts-' + (latest ? latest.timestamp : '!')
     initialize.resolve(pull(
-      pl.read({start: start, end: 'ts-~', keys: false}),
-      pull.filter(function (meta) {
-        return meta.key > meta.timestamp
-      })
+      pl.read(metadb, {start: start, end: 'ts-~', keys: false}),
+      latest
+      ? pull.filter(function (meta) {
+          return meta.timestamp > latest.timestamp
+        })
+      : pull.through()
     ))
+    ready = true
+    while(waiting.length)
+      waiting.shift()()
   })
 
   db.reprocess = function (cb) {
@@ -131,8 +151,7 @@ module.exports = function (db, metadb, cas, handler) {
       pl.read(metadb, {start: 'ts-!', end: 'ts-~', keys: false}),
       //write one at a time, _cb is triggered when that meta is written.
       pull.asyncMap(function (meta, cb) {
-        meta._cb = cb
-        workQueue.push(meta)
+        work(meta, cb)
       }),
       //once ALL the things have been written, cb.
       pull.drain(null, cb)
