@@ -13,13 +13,17 @@ var pl      = require('pull-level')
 
 var DataBlobs = require('../')
 
-function create (dirname, handle) {
-  rimraf.sync(dirname)
-  mkdirp.sync(dirname)
+function create (dirname, clean, handle) {
+  if(!handle) handle = clean, clean = true
 
+  if(clean) rimraf.sync(dirname)
+  mkdirp.sync(dirname)
+  var db = level(path.join(dirname, 'db'), {encoding: 'json'})
+  var metadb = level(path.join(dirname, 'meta'), {encoding: 'json'})
+
+  db.metadb = metadb
   return DataBlobs(
-    level(path.join(dirname, 'db'), {encoding: 'json'}),
-    level(path.join(dirname, 'meta'), {encoding: 'json'}),
+    db, metadb,
     cas(path.join(dirname, 'blobs')),
     handle
   )
@@ -105,7 +109,6 @@ tape('reprocess', function (t) {
   //now load a file into the database.
   var seen = []
   db.on('processing', function (meta) {
-    console.error(meta)
     seen.push(meta)
   })
   fs.createReadStream(path.join(__dirname, 'fixtures', 'example1.csv'))
@@ -116,4 +119,25 @@ tape('reprocess', function (t) {
         t.end()
       })
     })
+})
+
+tape('recover', function (t) {
+  var db = create(path.join(osenv.tmpdir(), 'datablobs-recover'), function (stream) {
+    stream.resume()
+    db.close(function () {
+      db.metadb.close(function () {
+        console.log('close')
+        //opening a new version of this database should start processing stuff that wasn't finished.
+        var db = create(path.join(osenv.tmpdir(), 'datablobs-recover'), false, processCsv)
+        db.on('processing', function (meta) {
+          console.log('meta', meta)
+          t.ok(meta)
+          t.end()
+        })
+      })
+    })
+  })
+
+  fs.createReadStream(path.join(__dirname, 'fixtures', 'example1.csv'))
+    .pipe(db.createDataBlobStream({type: 'example'}))
 })
