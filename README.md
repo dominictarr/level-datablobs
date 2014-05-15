@@ -36,7 +36,7 @@ var db = DataBlobs(
       }))
       //using a pull stream to write
       //because levelup's write stream emits close too early.
-      //see issue
+      //see levelup issue https://github.com/rvagg/node-levelup/issues/247
       .pipe(toStream(pl.write(db)).on('close', cb))
   }
 )
